@@ -30,6 +30,21 @@
         },
         "tags": ["MCP"]
       }
+    },
+    "/internal/basic-api-token-proxy": {
+      "post": {
+        "summary": "ID-JAG redemption proxy (strips the scope parameter Okta rejects)",
+        "description": "Not called directly by clients — this is what OKTA_RESOURCE_AS_TOKEN_URL points at instead of Okta's real token endpoint. @zuplo/runtime's mcp-token-exchange-inbound policy (id-jag authMode) unconditionally includes a `scope` form parameter on the jwt-bearer redemption request; Okta rejects that with `id_jag_scopes_in_request` regardless of policies.json's idJag.scopes. This route strips `scope` from the incoming form body and forwards everything else to the real Okta endpoint (REAL_OKTA_RESOURCE_AS_TOKEN_URL), then relays the response back verbatim.",
+        "operationId": "basicApiTokenProxy",
+        "x-zuplo-route": {
+          "corsPolicy": "none",
+          "handler": {
+            "export": "default",
+            "module": "$import(./modules/basic-api-token-proxy)"
+          }
+        },
+        "tags": ["MCP"]
+      }
     }
   },
   "tags": [

@@ -7,10 +7,13 @@ on both hops.
 
 > **Current status**: login and ID-JAG *issuance* are verified working
 > end-to-end against a real Okta trial and a real deployed gateway — Okta's
-> own System Log shows `app.oauth2.token.grant.id_jag | SUCCESS`. The final
-> leg (redemption) is blocked by a real gap in `@zuplo/runtime`, not
-> anything wrong with this project's Okta configuration. Full trace below,
-> after the architecture description.
+> own System Log shows `app.oauth2.token.grant.id_jag | SUCCESS`. Redemption
+> hit a real gap in `@zuplo/runtime` (not this project's Okta config) —
+> worked around with a small stripping proxy
+> (`modules/basic-api-token-proxy.ts`), mechanically confirmed to reach real
+> Okta correctly. Final live end-to-end confirmation is still pending — see
+> "Known gap and workaround" below for the full trace and exactly what's
+> left to verify.
 
 - **Inbound**: MCP clients (Claude Desktop, Claude Code, Cursor, MCP
   Inspector, ...) authenticate via Okta browser login. The gateway issues its
@@ -62,9 +65,9 @@ on both hops.
      Okta's **org** authorization server, authenticating as the same client
      as step 1 — Okta's System Log confirms
      `app.oauth2.token.grant.id_jag | SUCCESS` for this exact call.
-   - **Redeem** (`idJag.resourceAs`, **currently blocked**): the gateway
-     presents that ID-JAG to a dedicated Resource Authorization Server
-     representing `basic-api`
+   - **Redeem** (`idJag.resourceAs`, **worked around, pending final live
+     confirmation**): the gateway presents that ID-JAG to a dedicated
+     Resource Authorization Server representing `basic-api`
      (`grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer`). This fails
      on every attempt with Okta error `id_jag_scopes_in_request`. Root cause
      (read directly out of `@zuplo/runtime`'s compiled source): the
@@ -72,11 +75,29 @@ on both hops.
      sourced from whatever scope the ID-JAG issuance response granted
      (`basic-api.read` in our case, embedded by Okta automatically —
      independent of what `idJag.scopes` requests, including omitting it
-     entirely). Okta's own documented redemption request
+     entirely, and independent of the resource connection's scope config,
+     which Okta silently normalizes to the same grant regardless). Okta's
+     own documented redemption request
      ([Set up AI agent token exchange](https://developer.okta.com/docs/guides/ai-agent-token-exchange/authserver/main/))
      has no `scope` parameter at all — the grant is implied by the assertion
-     itself. This is a genuine gap in the runtime, not something
-     `policies.json` can work around; it needs a fix on Zuplo's side.
+     itself. No `policies.json` option, resource-connection config, or
+     custom policy can suppress it (custom policies have no access to the
+     raw subject token the exchange needs — it's internal to the
+     "runtime-owned" OAuth policies). **Workaround**: `OKTA_RESOURCE_AS_TOKEN_URL`
+     now points at `/internal/basic-api-token-proxy`
+     (`modules/basic-api-token-proxy.ts`, this repo) instead of Okta
+     directly — it strips the `scope` field from the incoming form body and
+     forwards everything else to the real endpoint
+     (`REAL_OKTA_RESOURCE_AS_TOKEN_URL`). Mechanically verified: a synthetic
+     request through the proxy reaches real Okta and gets a genuine Okta
+     error back (not a local one), confirming the forwarding logic works.
+     Final live end-to-end confirmation (an actual browser login all the
+     way through to a 200 from `basic-api`) is still pending — blocked
+     mid-session by an Okta sign-in widget that got stuck on a stale
+     browser session, unrelated to the proxy itself. This is still a
+     workaround, not a real fix — worth reporting to Zuplo regardless, since
+     the underlying runtime bug affects anyone using `authMode: "id-jag"`
+     against a resource connection with any scope configured at all.
 
 This is Okta's own [AI Agent Token
 Exchange](https://developer.okta.com/docs/guides/ai-agent-token-exchange/authserver/main/)
