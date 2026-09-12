@@ -1,3 +1,67 @@
 {
-  "policies": []
+  "policies": [
+    {
+      "name": "okta-inbound-oauth",
+      "policyType": "mcp-okta-oauth",
+      "handler": {
+        "export": "McpOktaOAuthInboundPolicy",
+        "module": "$import(@zuplo/runtime/mcp-gateway)",
+        "options": {
+          "oktaDomain": "$env(OKTA_DOMAIN)",
+          "clientId": "$env(OKTA_GATEWAY_CLIENT_ID)",
+          "clientSecret": "$env(OKTA_GATEWAY_CLIENT_SECRET)"
+        }
+      }
+    },
+    {
+      "name": "tool-rbac",
+      "policyType": "mcp-capability-filter-inbound",
+      "handler": {
+        "export": "McpCapabilityFilterInboundPolicy",
+        "module": "$import(@zuplo/runtime/mcp-gateway)",
+        "options": {
+          "accessControl": {
+            "mode": "rolesAndGroups"
+          },
+          "tools": [{ "name": "echo-get", "roles": ["mcp-user"] }]
+        }
+      }
+    },
+    {
+      "name": "okta-upstream-token-exchange",
+      "policyType": "mcp-token-exchange",
+      "handler": {
+        "export": "McpTokenExchangeInboundPolicy",
+        "module": "$import(@zuplo/runtime/mcp-gateway)",
+        "options": {
+          "id": "basic-api",
+          "displayName": "Basic API (Zuplo demo MCP server)",
+          "summary": "Exchanges the caller's Okta identity for an access token scoped to the downstream basic-api MCP server, via Okta Cross App Access (ID-JAG).",
+          "authMode": "id-jag",
+          "idJag": {
+            "scopes": ["basic-api.read"],
+            "idp": {
+              "tokenUrl": "$env(OKTA_IDJAG_TOKEN_URL)",
+              "clientAuth": {
+                "method": "private_key_jwt",
+                "clientId": "$env(OKTA_IDJAG_CLIENT_ID)",
+                "privateKeyPem": "$env(OKTA_IDJAG_PRIVATE_KEY_PEM)",
+                "algorithm": "RS256"
+              }
+            },
+            "resourceAs": {
+              "tokenUrl": "$env(OKTA_RESOURCE_AS_TOKEN_URL)",
+              "audience": "$env(OKTA_RESOURCE_AS_AUDIENCE)",
+              "clientAuth": {
+                "method": "private_key_jwt",
+                "clientId": "$env(OKTA_RESOURCE_CLIENT_ID)",
+                "privateKeyPem": "$env(OKTA_RESOURCE_PRIVATE_KEY_PEM)",
+                "algorithm": "RS256"
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
 }
