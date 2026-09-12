@@ -54,16 +54,20 @@ On-Behalf-Of token-exchange grant (which is client-credentials-style and
 stamps the acting client into a proprietary `cid` claim rather than a
 standards-based `act`).
 
-> **Availability caveat**: Cross App Access / Agent SSO is a young Okta
-> feature (GA'd 2026-08-24) and may not be turned on in every org, including
-> some free Integrator Free Plan orgs. Validate this project's shape against
-> Okta's hosted playground at [xaa.dev](https://xaa.dev) first — it's a
-> pre-wired IdP + Resource AS, no tenant setup required. If your org doesn't
-> expose Cross App Access at all, change `authMode` in
-> `config/policies.json`'s `okta-upstream-token-exchange` policy from
-> `"id-jag"` to `"shared-oauth"` (one admin-established upstream connection)
-> or `"user-oauth"` (per-user consent) — both sidestep this entirely at the
-> cost of a less strict delegation chain.
+> **Availability note**: Cross App Access / Agent SSO is a young Okta
+> feature (GA'd 2026-08-24). A 30-day Workforce Identity **trial** org
+> typically unlocks premium add-ons like this one for evaluation, so it
+> should be available — but it's worth confirming before wiring in real
+> credentials, since the perpetual (non-trial) Integrator Free Plan may not
+> include it. Okta's hosted playground at [xaa.dev](https://xaa.dev) lets you
+> validate this project's exact `idp`/`resourceAs` shape against a pre-wired
+> IdP + Resource AS with zero tenant setup, before touching your own org. If
+> your trial genuinely doesn't expose Cross App Access (check Security > API
+> for a Cross App Access / Agent SSO section, or ask Okta support), the only
+> fallback that's still a literal token exchange is a hand-written Zuplo
+> policy performing Okta's older On-Behalf-Of grant directly — `shared-oauth`
+> / `user-oauth` `authMode`s are plain OAuth brokering, not token exchange,
+> so they're not a drop-in substitute if that distinction matters to you.
 
 ### Okta setup required
 
