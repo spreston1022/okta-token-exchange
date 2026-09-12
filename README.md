@@ -20,17 +20,24 @@ on both hops:
 **One route, three policies, in order** (`config/routes.oas.json` /
 `config/policies.json`):
 
-1. `okta-inbound-oauth` (`mcp-okta-oauth` /
+1. `okta-inbound-oauth` (`mcp-okta-oauth-inbound` /
    `McpOktaOAuthInboundPolicy`) — sends the caller through Okta's browser
-   login (Authorization Code); the gateway issues its own access token bound
-   to this route.
+   login (Authorization Code) against the `default` custom authorization
+   server; the gateway issues its own access token bound to this route.
+   (Note the `-inbound` suffix on `policyType` — every provider wrapper in
+   `@zuplo/runtime/mcp-gateway` uses it, even though the class's own
+   `static policyType` field in the shipped `.d.ts` currently documents the
+   unsuffixed form. Using the unsuffixed string parses fine but silently
+   fails route registration at runtime — surfaces as a baffling
+   `Unknown MCP route: /mcp` on every request, with no indication which
+   policy caused it.)
 2. `tool-rbac` (`mcp-capability-filter-inbound` /
    `McpCapabilityFilterInboundPolicy`, `accessControl.mode: "rolesAndGroups"`)
    — only callers whose Okta role/group includes `mcp-user` see or can call
    `echo-get`; everyone else gets it filtered out of `tools/list` and blocked
    at invocation. Remove this policy (or widen the role) if you don't need
    per-tool gating yet — with one tool and a small test org it's optional.
-3. `okta-upstream-token-exchange` (`mcp-token-exchange` /
+3. `okta-upstream-token-exchange` (`mcp-token-exchange-inbound` /
    `McpTokenExchangeInboundPolicy`, `authMode: "id-jag"`) — the actual token
    exchange. Two legs happen here, both against Okta:
    - **Issue**: the gateway exchanges the caller's Okta identity assertion
@@ -74,9 +81,9 @@ standards-based `act`).
 You need a **free Okta org** for this — either an
 [Integrator Free Plan](https://developer.okta.com/docs/reference/org-defaults/)
 org (no credit card, deactivates after 90 days of no sign-ins) or a Workforce
-Identity Developer org. Both ship with a pre-configured `default` custom
-authorization server, though you'll create a second, dedicated one below for
-the resource leg.
+Identity trial org. Both ship with a pre-configured `default` custom
+authorization server, reused below for both the browser-login and ID-JAG
+legs; a second, dedicated one is created for the resource leg.
 
 1. **Gateway login app** — Applications > Create App Integration > OIDC -
    Web Application. Redirect URI: `https://<gateway-host>/__zuplo/oauth/callback`
@@ -86,12 +93,12 @@ the resource leg.
 2. **ID-JAG issuer app** — Applications > Create App Integration > API
    Services. Set **client authentication** to public key/private key (Cross
    App Access requires a signed `private_key_jwt` client assertion, not a
-   plain client secret) and generate/upload a key pair. On the org
+   plain client secret) and generate/upload a key pair. On the `default`
    authorization server's Access Policies (Security > API > Authorization
    Servers > `default`), add a rule granting this app's client the
    `urn:ietf:params:oauth:grant-type:token-exchange` grant type.
    → `OKTA_IDJAG_CLIENT_ID` / `OKTA_IDJAG_PRIVATE_KEY_PEM`,
-   `OKTA_IDJAG_TOKEN_URL=https://${OKTA_DOMAIN}/oauth2/v1/token`.
+   `OKTA_IDJAG_TOKEN_URL=https://${OKTA_DOMAIN}/oauth2/default/v1/token`.
 3. **Resource authorization server** — Security > API > Authorization
    Servers > Add Authorization Server, representing `basic-api`. Add a
    `basic-api.read` scope. Note its Audience value (this is
@@ -113,6 +120,21 @@ Copy `.env.example` to your Zuplo project's environment configuration and
 fill in the values (secrets in the secret store, not committed — every
 comment in that file says exactly which setup step above it corresponds to).
 
+**Status on the Okta trial org this was tested against** — steps 1–5's *objects* (apps, the
+`basic-api` authorization server + scope, the `mcp-user` group + its
+membership and claim) are already provisioned there via the Management API,
+and `.env` (gitignored, not committed) already has every value filled in.
+Two sub-steps remain — the actual grant-type-enabling policy rules on the
+shared `default` authorization server (step 2's `token-exchange` grant and,
+on `default` specifically, the rule wiring for the gateway login app's
+`authorization_code` grant) — these touch the org-wide `default` server, so
+they're left for you to add by hand (or approve explicitly) rather than
+scripted blind: Security > API > Authorization Servers > `default` > Access
+Policies. The private keys for the two service apps live locally at
+`~/.okta/secrets/{idjag-issuer,resource-redeemer}.pem` (gitignored, not
+committed) — the corresponding public JWKs are already uploaded to their
+Okta apps.
+
 ### Testing
 
 Use the [MCP Inspector](https://github.com/modelcontextprotocol/inspector)
@@ -122,6 +144,21 @@ first connect — or point a real MCP client (Claude Desktop, Claude Code) at
 the same URL. Call `echo-get` and check the response's
 `headers.authorization`: that's the token minted by the Okta ID-JAG exchange,
 not anything the client presented to the gateway.
+
+**Local-dev limitation**: `zuplo dev` can serve `/mcp` and its
+`.well-known/oauth-*` metadata (enough to confirm routing/policy config is
+valid), but the actual OAuth flows (`/__zuplo/oauth/register`, `/authorize`,
+`/token`) need durable storage for client registrations and token state that
+only exists once this project is deployed to Zuplo (`MCP Gateway runtime
+storage requires ZUPLO_SERVICE_BUCKET_ID` locally) — a real end-to-end login
+needs a deployed URL, not `localhost:9000`. Separately, `zuplo.jsonc`'s
+`compatibilityDate` is set to `2026-03-01`, matching MCP Gateway v2's stated
+requirement and the known-working reference project — the
+`create-zuplo-api` scaffold's original (older) default hadn't been bumped;
+worth keeping in mind if this ever gets reset, though it wasn't the cause of
+the `Unknown MCP route` bug above (that reproduced identically regardless of
+this date once real Okta values were in place — it was purely the
+policyType suffix).
 
 ---
 
