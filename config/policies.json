@@ -8,7 +8,6 @@
         "module": "$import(@zuplo/runtime/mcp-gateway)",
         "options": {
           "oktaDomain": "$env(OKTA_DOMAIN)",
-          "authorizationServerId": "default",
           "clientId": "$env(OKTA_GATEWAY_CLIENT_ID)",
           "clientSecret": "$env(OKTA_GATEWAY_CLIENT_SECRET)"
         }
@@ -47,16 +46,12 @@
           "summary": "Exchanges the caller's Okta identity for an access token scoped to the downstream basic-api MCP server, via Okta Cross App Access (ID-JAG).",
           "authMode": "id-jag",
           "idJag": {
-            "scopes": [
-              "basic-api.read"
-            ],
             "idp": {
               "tokenUrl": "$env(OKTA_IDJAG_TOKEN_URL)",
               "clientAuth": {
-                "method": "private_key_jwt",
-                "clientId": "$env(OKTA_IDJAG_CLIENT_ID)",
-                "privateKeyPem": "$env(OKTA_IDJAG_PRIVATE_KEY_PEM)",
-                "algorithm": "RS256"
+                "method": "client_secret_basic",
+                "clientId": "$env(OKTA_GATEWAY_CLIENT_ID)",
+                "clientSecret": "$env(OKTA_GATEWAY_CLIENT_SECRET)"
               }
             },
             "resourceAs": {

@@ -3,7 +3,14 @@
 An MCP Gateway that fronts [`basic-api`](https://basic-api-main-cf106ad.zuplo.app/mcp)
 (a Zuplo demo MCP server exposing one tool, `echo-get`, which reflects back
 the full incoming request — headers included) with real Okta authentication
-on both hops:
+on both hops.
+
+> **Current status**: login and ID-JAG *issuance* are verified working
+> end-to-end against a real Okta trial and a real deployed gateway — Okta's
+> own System Log shows `app.oauth2.token.grant.id_jag | SUCCESS`. The final
+> leg (redemption) is blocked by a real gap in `@zuplo/runtime`, not
+> anything wrong with this project's Okta configuration. Full trace below,
+> after the architecture description.
 
 - **Inbound**: MCP clients (Claude Desktop, Claude Code, Cursor, MCP
   Inspector, ...) authenticate via Okta browser login. The gateway issues its
@@ -22,9 +29,12 @@ on both hops:
 
 1. `okta-inbound-oauth` (`mcp-okta-oauth-inbound` /
    `McpOktaOAuthInboundPolicy`) — sends the caller through Okta's browser
-   login (Authorization Code) against the `default` custom authorization
-   server; the gateway issues its own access token bound to this route.
-   (Note the `-inbound` suffix on `policyType` — every provider wrapper in
+   login (Authorization Code) against Okta's **org** authorization server
+   (no `authorizationServerId` set); the gateway issues its own access token
+   bound to this route. This same app (`OKTA_GATEWAY_CLIENT_ID`) is also
+   registered as an **AI Agent** in Okta (Directory > AI Agents) — that's
+   what lets it perform ID-JAG issuance in step 3. (Note the `-inbound`
+   suffix on `policyType` — every provider wrapper in
    `@zuplo/runtime/mcp-gateway` uses it, even though the class's own
    `static policyType` field in the shipped `.d.ts` currently documents the
    unsuffixed form. Using the unsuffixed string parses fine but silently
@@ -33,23 +43,40 @@ on both hops:
    policy caused it.)
 2. `tool-rbac` (`mcp-capability-filter-inbound` /
    `McpCapabilityFilterInboundPolicy`, `accessControl.mode: "rolesAndGroups"`)
-   — only callers whose Okta role/group includes `mcp-user` see or can call
-   `echo-get`; everyone else gets it filtered out of `tools/list` and blocked
-   at invocation. Remove this policy (or widen the role) if you don't need
-   per-tool gating yet — with one tool and a small test org it's optional.
+   — intended to gate `echo-get` behind an Okta role/group named `mcp-user`.
+   **Currently fails closed**: the `groups` claim this relies on was added to
+   the `default` custom authorization server, but login now has to go
+   through the org AS instead (see step 1) to make ID-JAG issuance work, and
+   the org AS doesn't carry that claim. Net effect: nobody currently passes
+   this check. Remove this policy if you want a working (if ungated) tool
+   today; re-adding real RBAC needs a claims mechanism compatible with the
+   org AS, or a custom policy that checks group membership via the Okta
+   Users API directly instead of reading it off the token.
 3. `okta-upstream-token-exchange` (`mcp-token-exchange-inbound` /
    `McpTokenExchangeInboundPolicy`, `authMode: "id-jag"`) — the actual token
    exchange. Two legs happen here, both against Okta:
-   - **Issue**: the gateway exchanges the caller's Okta identity assertion
-     for an ID-JAG (`grant_type=urn:ietf:params:oauth:grant-type:token-exchange`,
+   - **Issue** (`idJag.idp`, verified working): the gateway exchanges the
+     caller's Okta ID token for an ID-JAG
+     (`grant_type=urn:ietf:params:oauth:grant-type:token-exchange`,
      `requested_token_type=urn:ietf:params:oauth:token-type:id-jag`) at
-     Okta's org authorization server.
-   - **Redeem**: the gateway presents that ID-JAG to a dedicated Resource
-     Authorization Server representing `basic-api`
-     (`grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer`), which
-     returns an access token scoped to `basic-api.read`. That token is
-     attached as the outbound `Authorization` header before the request is
-     forwarded to `basic-api-main-cf106ad.zuplo.app/mcp`.
+     Okta's **org** authorization server, authenticating as the same client
+     as step 1 — Okta's System Log confirms
+     `app.oauth2.token.grant.id_jag | SUCCESS` for this exact call.
+   - **Redeem** (`idJag.resourceAs`, **currently blocked**): the gateway
+     presents that ID-JAG to a dedicated Resource Authorization Server
+     representing `basic-api`
+     (`grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer`). This fails
+     on every attempt with Okta error `id_jag_scopes_in_request`. Root cause
+     (read directly out of `@zuplo/runtime`'s compiled source): the
+     redemption request unconditionally includes a `scope` parameter,
+     sourced from whatever scope the ID-JAG issuance response granted
+     (`basic-api.read` in our case, embedded by Okta automatically —
+     independent of what `idJag.scopes` requests, including omitting it
+     entirely). Okta's own documented redemption request
+     ([Set up AI agent token exchange](https://developer.okta.com/docs/guides/ai-agent-token-exchange/authserver/main/))
+     has no `scope` parameter at all — the grant is implied by the assertion
+     itself. This is a genuine gap in the runtime, not something
+     `policies.json` can work around; it needs a fix on Zuplo's side.
 
 This is Okta's own [AI Agent Token
 Exchange](https://developer.okta.com/docs/guides/ai-agent-token-exchange/authserver/main/)
@@ -61,79 +88,66 @@ On-Behalf-Of token-exchange grant (which is client-credentials-style and
 stamps the acting client into a proprietary `cid` claim rather than a
 standards-based `act`).
 
-> **Availability note**: Cross App Access / Agent SSO is a young Okta
-> feature (GA'd 2026-08-24). A 30-day Workforce Identity **trial** org
-> typically unlocks premium add-ons like this one for evaluation, so it
-> should be available — but it's worth confirming before wiring in real
-> credentials, since the perpetual (non-trial) Integrator Free Plan may not
-> include it. Okta's hosted playground at [xaa.dev](https://xaa.dev) lets you
-> validate this project's exact `idp`/`resourceAs` shape against a pre-wired
-> IdP + Resource AS with zero tenant setup, before touching your own org. If
-> your trial genuinely doesn't expose Cross App Access (check Security > API
-> for a Cross App Access / Agent SSO section, or ask Okta support), the only
-> fallback that's still a literal token exchange is a hand-written Zuplo
-> policy performing Okta's older On-Behalf-Of grant directly — `shared-oauth`
-> / `user-oauth` `authMode`s are plain OAuth brokering, not token exchange,
-> so they're not a drop-in substitute if that distinction matters to you.
+> **On the "is this an entitlement gap?" question**: no. Verified directly
+> against Okta's own developer docs — "Okta for AI Agents" (the paid add-on)
+> is only required for higher ID-JAG token *volumes* ("Machine access" tab);
+> the base flow this project uses just needs an org with SSO, which any
+> trial has. Also checked Okta's Early-Access Features API
+> (`/api/v1/features`) for a hidden toggle — nothing related exists there
+> either. The remaining blocker (above) is a real code gap, not a
+> subscription wall.
 
 ### Okta setup required
 
 You need a **free Okta org** for this — either an
 [Integrator Free Plan](https://developer.okta.com/docs/reference/org-defaults/)
 org (no credit card, deactivates after 90 days of no sign-ins) or a Workforce
-Identity trial org. Both ship with a pre-configured `default` custom
-authorization server, reused below for both the browser-login and ID-JAG
-legs; a second, dedicated one is created for the resource leg.
+Identity trial org. The full, verified setup:
 
-1. **Gateway login app** — Applications > Create App Integration > OIDC -
+1. **Gateway/agent app** — Applications > Create App Integration > OIDC -
    Web Application. Redirect URI: `https://<gateway-host>/__zuplo/oauth/callback`
-   (and `http://localhost:9000/__zuplo/oauth/callback` for local dev). This
-   is identity-only; no API/audience needed. → `OKTA_GATEWAY_CLIENT_ID` /
-   `OKTA_GATEWAY_CLIENT_SECRET`.
-2. **ID-JAG issuer app** — Applications > Create App Integration > API
-   Services. Set **client authentication** to public key/private key (Cross
-   App Access requires a signed `private_key_jwt` client assertion, not a
-   plain client secret) and generate/upload a key pair. On the `default`
-   authorization server's Access Policies (Security > API > Authorization
-   Servers > `default`), add a rule granting this app's client the
-   `urn:ietf:params:oauth:grant-type:token-exchange` grant type.
-   → `OKTA_IDJAG_CLIENT_ID` / `OKTA_IDJAG_PRIVATE_KEY_PEM`,
-   `OKTA_IDJAG_TOKEN_URL=https://${OKTA_DOMAIN}/oauth2/default/v1/token`.
+   (and `http://localhost:9000/__zuplo/oauth/callback` for local dev).
+   → `OKTA_GATEWAY_CLIENT_ID` / `OKTA_GATEWAY_CLIENT_SECRET`. Assign whoever
+   should reach the gateway to this app (Applications > this app >
+   Assignments) — Okta requires this separately from group membership.
+2. **Register it as an AI Agent** — Directory > AI Agents > Register AI
+   agent. Profile: any name/description. User access: "Select an existing
+   app" → the app from step 1 (not a new one). This auto-adds the
+   `token-exchange` and `jwt-bearer` grant types to that app.
 3. **Resource authorization server** — Security > API > Authorization
    Servers > Add Authorization Server, representing `basic-api`. Add a
    `basic-api.read` scope. Note its Audience value (this is
    `OKTA_RESOURCE_AS_AUDIENCE` — not the `basic-api` URL itself) and its
    token endpoint (`OKTA_RESOURCE_AS_TOKEN_URL`).
-4. **Resource redemption app** — another API Services app (or the same one
-   from step 2, given an access policy on this new authorization server too),
-   same private-key client authentication, authorized for the
+4. **Resource app + Cross App Access** — create another OIDC app
+   representing the resource (a "Resource server" style app works), enable
+   **Cross App Access (XAA)** on it (Applications > this app > Sign On >
+   Access Methods > Cross-app access (XAA) > Enabled), with **Issuer URL**
+   set to the authorization server from step 3's issuer.
+5. **Resource redemption app** — a separate API Services app, client
+   authentication = public/private key (`private_key_jwt` — XAA requires a
+   signed client assertion here, not a plain secret), authorized for the
    `urn:ietf:params:oauth:grant-type:jwt-bearer` grant type on the
-   authorization server from step 3. → `OKTA_RESOURCE_CLIENT_ID` /
-   `OKTA_RESOURCE_PRIVATE_KEY_PEM`.
-5. **Role/group for RBAC** — create an Okta group (or app role) named
-   `mcp-user`, assign it to whoever should be able to call `echo-get`, and
-   make sure the authorization server used for browser login includes a
-   `roles` or `groups` claim on the access token sourced from it (Security >
-   API > Authorization Servers > [server] > Claims).
+   authorization server from step 3 (Access Policies there, scoped to this
+   app's client). → `OKTA_RESOURCE_CLIENT_ID` / `OKTA_RESOURCE_PRIVATE_KEY_PEM`.
+6. **Resource connection** — Directory > AI Agents > [your agent] > Resource
+   connections > Add resource connection. Application instance: the resource
+   app from step 4. Resource indicator: the actual MCP server URL
+   (`UPSTREAM_BASIC_API_MCP_URL`). "AI agent's client ID registered in this
+   app": the redemption app's client ID from step 5. Scopes: any.
+7. **Assign the test user to the resource app too** (step 4's app,
+   Applications > Assignments) — easy to miss, and without it the flow fails
+   the same way as a missing resource connection would.
+8. **Add a grant-type access policy rule on Okta's `default` authorization
+   server** for the gateway/agent app's client (step 1), allowing
+   `urn:ietf:params:oauth:grant-type:token-exchange` — this turned out *not*
+   to be load-bearing for the working org-AS flow, but was added during
+   diagnosis and left in place; harmless either way.
 
 Copy `.env.example` to your Zuplo project's environment configuration and
 fill in the values (secrets in the secret store, not committed — every
-comment in that file says exactly which setup step above it corresponds to).
-
-**Status on the Okta trial org this was tested against** — steps 1–5's *objects* (apps, the
-`basic-api` authorization server + scope, the `mcp-user` group + its
-membership and claim) are already provisioned there via the Management API,
-and `.env` (gitignored, not committed) already has every value filled in.
-Two sub-steps remain — the actual grant-type-enabling policy rules on the
-shared `default` authorization server (step 2's `token-exchange` grant and,
-on `default` specifically, the rule wiring for the gateway login app's
-`authorization_code` grant) — these touch the org-wide `default` server, so
-they're left for you to add by hand (or approve explicitly) rather than
-scripted blind: Security > API > Authorization Servers > `default` > Access
-Policies. The private keys for the two service apps live locally at
-`~/.okta/secrets/{idjag-issuer,resource-redeemer}.pem` (gitignored, not
-committed) — the corresponding public JWKs are already uploaded to their
-Okta apps.
+comment in that file says exactly which setup step above it corresponds to,
+and flags the one leg that's currently blocked).
 
 ### Testing
 
